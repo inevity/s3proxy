@@ -89,6 +89,7 @@ import org.jclouds.blobstore.domain.MultipartPart;
 import org.jclouds.blobstore.domain.MultipartUpload;
 import org.jclouds.blobstore.domain.PageSet;
 import org.jclouds.blobstore.domain.StorageMetadata;
+import org.jclouds.blobstore.domain.Tier;
 import org.jclouds.blobstore.domain.internal.MutableBlobMetadataImpl;
 import org.jclouds.blobstore.options.CopyOptions;
 import org.jclouds.blobstore.options.CreateContainerOptions;
@@ -101,6 +102,7 @@ import org.jclouds.io.ContentMetadataBuilder;
 import org.jclouds.io.Payload;
 import org.jclouds.io.Payloads;
 import org.jclouds.rest.AuthorizationException;
+import org.jclouds.s3.domain.ObjectMetadata.StorageClass;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -164,7 +166,8 @@ public class S3ProxyHandler {
             "x-amz-copy-source-range",
             "x-amz-date",
             "x-amz-decoded-content-length",
-            "x-amz-metadata-directive"
+            "x-amz-metadata-directive",
+            "x-amz-storage-class"
     );
     private static final Set<String> CANNED_ACLS = ImmutableSet.of(
             "private",
@@ -527,10 +530,6 @@ public class S3ProxyHandler {
                 continue;
             }
             if (headerName.startsWith("x-amz-meta-")) {
-                continue;
-            }
-            if (headerName.equals("x-amz-storage-class") &&
-                    request.getHeader(headerName).equals("STANDARD")) {
                 continue;
             }
             if (!SUPPORTED_X_AMZ_HEADERS.contains(headerName.toLowerCase())) {
@@ -1712,6 +1711,15 @@ public class S3ProxyHandler {
                 .payload(is)
                 .contentLength(contentLength);
 
+        String storageClass = request.getHeader("x-amz-storage-class");
+        if (storageClass == null || storageClass.equalsIgnoreCase("STANDARD")) {
+            // defaults to STANDARD
+        } else if (storageClass.equalsIgnoreCase("STANDARD_IA")) {
+            builder.tier(Tier.INFREQUENT);
+        } else {
+            throw new IllegalArgumentException();  // TODO:
+        }
+
         addContentMetdataFromHttpRequest(builder, request);
         if (contentMD5 != null) {
             builder = builder.contentMD5(contentMD5);
@@ -1897,6 +1905,7 @@ public class S3ProxyHandler {
         BlobBuilder.PayloadBlobBuilder builder = blobStore
                 .blobBuilder(blobName)
                 .payload(payload);
+        // TODO: tier
         addContentMetdataFromHttpRequest(builder, request);
         builder.contentLength(payload.size());
 
@@ -2400,6 +2409,7 @@ public class S3ProxyHandler {
         }
 
         // TODO: how to reconstruct original mpu?
+        // TODO: tier for non-S3
         MultipartUpload mpu = MultipartUpload.create(containerName,
                 blobName, uploadId, createFakeBlobMetadata(blobStore),
                 new PutOptions());
@@ -2495,6 +2505,11 @@ public class S3ProxyHandler {
         }
         response.addDateHeader(HttpHeaders.LAST_MODIFIED,
                 metadata.getLastModified().getTime());
+        Tier tier = metadata.getTier();
+        if (tier != null) {
+            response.addHeader("x-amz-storage-class",
+                    StorageClass.fromTier(tier).toString());
+        }
         for (Map.Entry<String, String> entry :
                 metadata.getUserMetadata().entrySet()) {
             response.addHeader(USER_METADATA_PREFIX + entry.getKey(),
