@@ -24,6 +24,7 @@ import java.io.InputStream;
 import java.io.PrintStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.Executors;
@@ -31,6 +32,8 @@ import java.util.concurrent.TimeUnit;
 
 import com.google.common.base.Strings;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Maps;
 import com.google.common.io.Files;
 import com.google.inject.Module;
 
@@ -57,7 +60,7 @@ public final class Main {
     private static final class Options {
         @Option(name = "--properties",
                 usage = "S3Proxy configuration (required)")
-        private File propertiesFile;
+        private List<File> propertiesFiles;
 
         @Option(name = "--version", usage = "display version")
         private boolean version;
@@ -81,12 +84,21 @@ public final class Main {
             System.err.println(
                     Main.class.getPackage().getImplementationVersion());
             System.exit(0);
-        } else if (options.propertiesFile == null) {
+        } else if (options.propertiesFiles.isEmpty()) {
             usage(parser);
         }
 
+    // TODO: this uses the S3Proxy configuration from the first properties file
+    // to configure the local endpoint.  Instead we need some sane way to
+    // specify only a single S3Proxy config but allow multiple backend
+    // configurations.
+    // TODO: what about multiple anonymous accounts?
+    // TODO: refactor to fix indentation
+    S3Proxy.Builder s3ProxyBuilder = null;
+    ImmutableMap.Builder<String, Map.Entry<String, BlobStore>> locators = ImmutableMap.builder();
+    for (File propertiesFile : options.propertiesFiles) {
         Properties properties = new Properties();
-        try (InputStream is = new FileInputStream(options.propertiesFile)) {
+        try (InputStream is = new FileInputStream(propertiesFile)) {
             properties.load(is);
         }
         properties.putAll(System.getProperties());
@@ -195,11 +207,12 @@ public final class Main {
             System.err.println("Using read-only storage backend");
             blobStore = ReadOnlyBlobStore.newReadOnlyBlobStore(blobStore);
         }
+        locators.put(localIdentity, Maps.immutableEntry(localCredential, blobStore));
 
-        S3Proxy s3Proxy;
-        try {
-            S3Proxy.Builder s3ProxyBuilder = S3Proxy.builder()
+        if (s3ProxyBuilder == null) {
+            s3ProxyBuilder = S3Proxy.builder()
                     .blobStore(blobStore);
+
             if (s3ProxyEndpointString != null) {
                 s3ProxyBuilder.endpoint(new URI(s3ProxyEndpointString));
             }
@@ -232,12 +245,27 @@ public final class Main {
             if (s3ProxyServicePath != null) {
                 s3ProxyBuilder.servicePath(s3ProxyServicePath);
             }
+        }
+    }
+
+        S3Proxy s3Proxy;
+        try {
             s3Proxy = s3ProxyBuilder.build();
         } catch (IllegalArgumentException | IllegalStateException e) {
             System.err.println(e.getMessage());
             System.exit(1);
             throw e;
         }
+
+        final Map<String, Map.Entry<String, BlobStore>> locator = locators.build();
+        s3Proxy.setBlobStoreLocator(new BlobStoreLocator() {
+            @Override
+            public Map.Entry<String, BlobStore> locateBlobStore(
+                    String identity, String container, String blob) {
+                return locator.get(identity);
+            }
+        });
+
         try {
             s3Proxy.start();
         } catch (Exception e) {
